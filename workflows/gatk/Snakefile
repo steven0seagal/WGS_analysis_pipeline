@@ -1,0 +1,239 @@
+import os
+
+# Load configuration
+configfile: "config.yaml"
+
+# --- Target Rule ---
+rule all:
+    input:
+        "results/vcfs/final_merged.vcf.gz",
+        "results/vcfs/final_merged.vcf.gz.tbi",
+        "results/annotated/final.snpeff.vcf",
+        "results/annotated/final.vep.vcf"
+
+# --- Step 1: Per-Sample HaplotypeCaller ---
+rule haplotypecaller:
+    input:
+        bam=os.path.join(config["paths"]["bam_dir"], "{sample}.analysis_ready.bam"),
+        ref=config["paths"]["ref_genome"]
+    output:
+        gvcf="results/gvcfs/{sample}.g.vcf.gz"
+    params:
+        dbsnp=config["paths"]["resources"]["dbsnp"],
+        java_opts=config["params"]["java_opts"]
+    log:
+        "logs/haplotypecaller/{sample}.log"
+    conda:
+        "envs/gatk.yaml"
+    shell:
+        """
+        gatk --java-options "{params.java_opts}" HaplotypeCaller \\
+            -R {input.ref} \\
+            -I {input.bam} \\
+            -O {output.gvcf} \\
+            -ERC GVCF \\
+            -D {params.dbsnp} &> {log}
+        """
+
+# --- Step 2: Consolidate GVCFs per Interval ---
+rule genomicsdb_import:
+    input:
+        gvcfs=expand("results/gvcfs/{sample}.g.vcf.gz", sample=config["samples"]),
+        ref=config["paths"]["ref_genome"]
+    output:
+        db=directory("results/genomicsdb/{interval}_db")
+    params:
+        java_opts=config["params"]["java_opts"]
+    log:
+        "logs/genomicsdb_import/{interval}.log"
+    conda:
+        "envs/gatk.yaml"
+    shell:
+        """
+        gatk --java-options "{params.java_opts}" GenomicsDBImport \\
+            $(for gvcf in {input.gvcfs}; do echo -n "-V $gvcf "; done) \\
+            --genomicsdb-workspace-path {output.db} \\
+            -L {wildcards.interval} \\
+            --reader-threads 4 &> {log}
+        """
+
+# --- Step 3: Joint Genotyping per Interval ---
+rule genotype_gvcfs:
+    input:
+        db="results/genomicsdb/{interval}_db",
+        ref=config["paths"]["ref_genome"]
+    output:
+        vcf="results/raw_vcfs/{interval}.vcf.gz"
+    params:
+        dbsnp=config["paths"]["resources"]["dbsnp"],
+        java_opts=config["params"]["java_opts"]
+    log:
+        "logs/genotype_gvcfs/{interval}.log"
+    conda:
+        "envs/gatk.yaml"
+    shell:
+        """
+        gatk --java-options "{params.java_opts}" GenotypeGVCFs \\
+            -R {input.ref} \\
+            -V gendb://{input.db} \\
+            -O {output.vcf} \\
+            -D {params.dbsnp} &> {log}
+        """
+
+# --- Step 4: VQSR (in four parts) ---
+# 4a. Build SNP Recalibration Model
+rule variant_recalibrator_snp:
+    input:
+        vcf="results/raw_vcfs/{interval}.vcf.gz",
+        ref=config["paths"]["ref_genome"]
+    output:
+        recal="results/recal/{interval}.snps.recal",
+        tranches="results/recal/{interval}.snps.tranches"
+    params:
+        hapmap=config["paths"]["resources"]["hapmap"],
+        omni=config["paths"]["resources"]["omni"],
+        phase1=config["paths"]["resources"]["phase1"],
+        dbsnp=config["paths"]["resources"]["dbsnp"]
+    log:
+        "logs/vqsr_snp/{interval}.log"
+    conda:
+        "envs/gatk.yaml"
+    shell:
+        """
+        gatk VariantRecalibrator \\
+            -R {input.ref} -V {input.vcf} \\
+            --resource:hapmap,known=false,training=true,truth=true,prior=15.0 {params.hapmap} \\
+            --resource:omni,known=false,training=true,truth=true,prior=12.0 {params.omni} \\
+            --resource:1000G,known=false,training=true,truth=false,prior=10.0 {params.phase1} \\
+            --resource:dbsnp,known=true,training=false,truth=false,prior=2.0 {params.dbsnp} \\
+            -an QD -an MQ -an MQRankSum -an ReadPosRankSum -an FS -an SOR \\
+            -mode SNP -O {output.recal} --tranches-file {output.tranches} &> {log}
+        """
+
+# 4b. Apply SNP Recalibration
+rule apply_vqsr_snp:
+    input:
+        vcf="results/raw_vcfs/{interval}.vcf.gz",
+        ref=config["paths"]["ref_genome"],
+        recal="results/recal/{interval}.snps.recal",
+        tranches="results/recal/{interval}.snps.tranches"
+    output:
+        vcf="results/recal_snps_vcfs/{interval}.vcf.gz"
+    params:
+        sensitivity=config["params"]["vqsr"]["snp_sensitivity"]
+    log:
+        "logs/apply_vqsr_snp/{interval}.log"
+    conda:
+        "envs/gatk.yaml"
+    shell:
+        """
+        gatk ApplyVQSR \\
+            -R {input.ref} -V {input.vcf} -O {output.vcf} \\
+            --recal-file {input.recal} --tranches-file {input.tranches} \\
+            --truth-sensitivity-filter-level {params.sensitivity} -mode SNP &> {log}
+        """
+
+# 4c. Build Indel Recalibration Model
+rule variant_recalibrator_indel:
+    input:
+        vcf="results/recal_snps_vcfs/{interval}.vcf.gz",
+        ref=config["paths"]["ref_genome"]
+    output:
+        recal="results/recal/{interval}.indels.recal",
+        tranches="results/recal/{interval}.indels.tranches"
+    params:
+        mills=config["paths"]["resources"]["mills"],
+        dbsnp=config["paths"]["resources"]["dbsnp"]
+    log:
+        "logs/vqsr_indel/{interval}.log"
+    conda:
+        "envs/gatk.yaml"
+    shell:
+        """
+        gatk VariantRecalibrator \\
+            -R {input.ref} -V {input.vcf} \\
+            --resource:mills,known=false,training=true,truth=true,prior=12.0 {params.mills} \\
+            --resource:dbsnp,known=true,training=false,truth=false,prior=2.0 {params.dbsnp} \\
+            -an QD -an DP -an FS -an SOR -an ReadPosRankSum -an MQRankSum \\
+            -mode INDEL -O {output.recal} --tranches-file {output.tranches} &> {log}
+        """
+
+# 4d. Apply Indel Recalibration
+rule apply_vqsr_indel:
+    input:
+        vcf="results/recal_snps_vcfs/{interval}.vcf.gz",
+        ref=config["paths"]["ref_genome"],
+        recal="results/recal/{interval}.indels.recal",
+        tranches="results/recal/{interval}.indels.tranches"
+    output:
+        vcf="results/final_vcfs/{interval}.vcf.gz"
+    params:
+        sensitivity=config["params"]["vqsr"]["indel_sensitivity"]
+    log:
+        "logs/apply_vqsr_indel/{interval}.log"
+    conda:
+        "envs/gatk.yaml"
+    shell:
+        """
+        gatk ApplyVQSR \\
+            -R {input.ref} -V {input.vcf} -O {output.vcf} \\
+            --recal-file {input.recal} --tranches-file {input.tranches} \\
+            --truth-sensitivity-filter-level {params.sensitivity} -mode INDEL &> {log}
+        """
+
+# --- Step 5: Merge final VCFs from all intervals ---
+rule merge_vcfs:
+    input:
+        vcfs=expand("results/final_vcfs/{interval}.vcf.gz", interval=config["intervals"])
+    output:
+        vcf="results/vcfs/final_merged.vcf.gz",
+        tbi="results/vcfs/final_merged.vcf.gz.tbi"
+    log:
+        "logs/merge_vcfs.log"
+    conda:
+        "envs/gatk.yaml"
+    shell:
+        """
+        gatk GatherVcfs \\
+            $(for vcf in {input.vcfs}; do echo -n "-I $vcf "; done) \\
+            -O {output.vcf} &> {log}
+        """
+
+# --- Step 6: Functional Annotation ---
+rule snpeff_annotate:
+    input:
+        vcf="results/vcfs/final_merged.vcf.gz"
+    output:
+        vcf="results/annotated/final.snpeff.vcf"
+    params:
+        genome="GRCh38.105"
+    log:
+        "logs/snpeff.log"
+    conda:
+        "envs/snpeff.yaml"
+    shell:
+        """
+        snpEff ann {params.genome} {input.vcf} > {output.vcf} 2> {log}
+        """
+
+rule vep_annotate:
+    input:
+        vcf="results/vcfs/final_merged.vcf.gz",
+        ref=config["paths"]["ref_genome"]
+    output:
+        vcf="results/annotated/final.vep.vcf"
+    params:
+        cache_dir=config.get("paths", {}).get("vep_cache", "~/.vep")
+    log:
+        "logs/vep.log"
+    conda:
+        "envs/vep.yaml"
+    threads: 4
+    shell:
+        """
+        vep -i {input.vcf} -o {output.vcf} \\
+            --vcf --cache --offline \\
+            --dir_cache {params.cache_dir} \\
+            --fasta {input.ref} \\
+            --everything --fork {threads} &> {log}
+        """

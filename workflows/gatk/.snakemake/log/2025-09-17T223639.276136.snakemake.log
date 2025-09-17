@@ -1,0 +1,9 @@
+Lints for snakefile /home/bartek/Pycharm/my_projects/WGS_analysis/workflows/gatk/Snakefile:
+    * Absolute path "/path/to/.vep" in line 226:
+      Do not define absolute paths inside of the workflow, since this renders
+      your workflow irreproducible on other machines. Use path relative to the
+      working directory instead, or make the path configurable via a config
+      file.
+      Also see:
+      https://snakemake.readthedocs.io/en/latest/snakefiles/configuration.html#configuration
+

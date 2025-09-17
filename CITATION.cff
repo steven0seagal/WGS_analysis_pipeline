@@ -1,0 +1,19 @@
+cff-version: 1.2.0
+message: "If you use this software, please cite it as below."
+type: software
+title: "WGS Analysis Pipeline: Comprehensive Germline Variant Analysis with GATK and DeepVariant"
+authors:
+- family-names: "Seagal"
+  given-names: "Steven"
+  orcid: "https://orcid.org/0000-0000-0000-0000"  # Replace with actual ORCID if available
+repository-code: "https://github.com/steven0seagal/WGS_analysis"
+url: "https://github.com/steven0seagal/WGS_analysis"
+license: MIT
+preferred-citation:
+  type: software
+  title: "WGS Analysis Pipeline"
+  authors:
+  - family-names: "Seagal"
+    given-names: "Steven"
+  repository-code: "https://github.com/steven0seagal/WGS_analysis"
+  year: 2025

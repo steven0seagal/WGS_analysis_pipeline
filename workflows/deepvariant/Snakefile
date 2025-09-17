@@ -1,0 +1,53 @@
+import os
+
+configfile: "config.yaml"
+
+# --- Target Rule ---
+rule all:
+    input:
+        expand("results/deepvariant/{sample}/{sample}.vcf.gz", sample=config["samples"]),
+        expand("results/deepvariant/{sample}/{sample}.g.vcf.gz", sample=config["samples"])
+
+# --- DeepVariant Rule ---
+rule deepvariant:
+    input:
+        bam=os.path.join(config["paths"]["bam_dir"], "{sample}.analysis_ready.bam"),
+        ref=config["paths"]["ref_genome"]
+    output:
+        vcf="results/deepvariant/{sample}/{sample}.vcf.gz",
+        gvcf="results/deepvariant/{sample}/{sample}.g.vcf.gz",
+        report="results/deepvariant/{sample}/{sample}.vcf.gz.html" # Visual report
+    params:
+        model=config["params"]["deepvariant"]["model_type"],
+        out_dir_container="output/{sample}"
+    log:
+        "logs/deepvariant/{sample}.log"
+    threads: 8 # Corresponds to num_shards
+    container:
+        f"docker://google/deepvariant:{config['params']['deepvariant']['version']}"
+    shell:
+        """
+        # The run_deepvariant script needs an output directory to exist.
+        # Snakemake creates the output file's directory, but not the parent.
+        # We also need to get the absolute paths for mounting.
+        BAM_ABS_PATH=$(realpath {input.bam})
+        REF_ABS_PATH=$(realpath {input.ref})
+        OUTPUT_DIR_ABS_PATH=$(realpath results/deepvariant/{wildcards.sample})
+
+        # Define input and output paths from the container's perspective
+        BAM_CONTAINER="input/$(basename {input.bam})"
+        REF_CONTAINER="input/$(basename {input.ref})"
+        VCF_CONTAINER="{params.out_dir_container}/$(basename {output.vcf})"
+        GVCF_CONTAINER="{params.out_dir_container}/$(basename {output.gvcf})"
+
+        # The singularity/docker command is constructed by snakemake automatically.
+        # This shell command is what runs *inside* the container.
+        # Here, we only need to specify the tool's command line.
+        /opt/deepvariant/bin/run_deepvariant \\
+            --model_type={params.model} \\
+            --ref=${{REF_CONTAINER}} \\
+            --reads=${{BAM_CONTAINER}} \\
+            --output_vcf=${{VCF_CONTAINER}} \\
+            --output_gvcf=${{GVCF_CONTAINER}} \\
+            --num_shards={threads} &> {log}
+        """

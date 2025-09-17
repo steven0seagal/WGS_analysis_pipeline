@@ -1,0 +1,14 @@
+---
+samples:
+  - Sample1
+  - Sample2
+  - Sample3
+
+paths:
+  ref_genome: "reference/Homo_sapiens_assembly38.fasta"
+  bam_dir: "analysis_ready_bams"
+
+params:
+  deepvariant:
+    version: "1.6.1"
+    model_type: "WGS"  # Options: WGS, WES, PACBIO

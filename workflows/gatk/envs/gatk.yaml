@@ -1,0 +1,9 @@
+---
+channels:
+  - bioconda
+  - conda-forge
+dependencies:
+  - gatk4
+  - r-base
+  - r-ggplot2
+  - r-dplyr

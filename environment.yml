@@ -1,0 +1,16 @@
+---
+name: wgs_analysis
+channels:
+  - bioconda
+  - conda-forge
+  - defaults
+dependencies:
+  - gatk4
+  - bwa
+  - samtools
+  - snakemake-minimal
+  - snpeff
+  - ensembl-vep
+  - python=3.9
+  - pip
+  - openjdk=11
