@@ -5,12 +5,37 @@ channels:
   - conda-forge
   - defaults
 dependencies:
-  - gatk4
+  # Core tools
+  - python=3.9
+  - openjdk=11
+  - pip
+
+  # Workflow management
+  - snakemake-minimal
+
+  # Alignment and preprocessing
   - bwa
   - samtools
-  - snakemake-minimal
+  - picard
+  - trimmomatic
+
+  # Variant calling
+  - gatk4
+
+  # SV/CNV calling tools
+  - manta
+  - delly
+  - lumpy-sv
+  - cnvnator
+  - survivor
+
+  # QC and utilities
+  - fastqc
+  - multiqc
+  - bcftools
+  - tabix
+
+  # Annotation
   - snpeff
   - ensembl-vep
-  - python=3.9
-  - pip
-  - openjdk=11
+  - annotsv

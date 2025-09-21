@@ -1,0 +1,8 @@
+name: sv_cnv_alignment
+channels:
+  - conda-forge
+  - bioconda
+dependencies:
+  - bwa>=0.7.17
+  - samtools>=1.15
+  - picard>=2.27.4

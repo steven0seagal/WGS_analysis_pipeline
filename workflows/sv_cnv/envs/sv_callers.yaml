@@ -1,0 +1,10 @@
+name: sv_cnv_sv_callers
+channels:
+  - conda-forge
+  - bioconda
+dependencies:
+  - manta>=1.6.0
+  - delly>=0.9.1
+  - lumpy-sv>=0.3.1
+  - bcftools>=1.15
+  - tabix>=1.15

@@ -1,0 +1,84 @@
+# Configuration file for SV/CNV Analysis Pipeline
+# Modify paths and parameters according to your setup
+
+# === INPUT DATA ===
+
+# Path to the TSV file listing samples (optional)
+# If not provided, uses single sample from 'sample' parameter
+samples_tsv: "samples.tsv"
+
+# Single sample name (used if samples_tsv not available)
+sample: "NA12878"
+
+# Directory containing raw FASTQ files
+# Files should be named: {sample}_R1.fastq.gz and {sample}_R2.fastq.gz
+raw_reads_dir: "/path/to/raw_reads"
+
+# === REFERENCE FILES ===
+
+# Path to reference genome FASTA file (must be indexed with BWA and samtools)
+reference_fasta: "/path/to/reference/GRCh38.fasta"
+
+# Path to adapter sequences for trimming
+adapters_fasta: "/path/to/adapters/TruSeq3-PE.fa"
+
+# Directory with chromosome FASTA files for CNVnator
+reference_chrom_dir: "/path/to/reference/GRCh38_chromosomes"
+
+# Genome build for annotation (GRCh37, GRCh38)
+genome_build: "GRCh38"
+
+# === TOOL PARAMETERS ===
+
+# Trimmomatic parameters
+trimmomatic_extra: "ILLUMINACLIP:{adapters}:2:30:10 SLIDINGWINDOW:4:20 MINLEN:50"
+
+# CNVnator bin size (1000 for 30x coverage, 500 for 60x coverage)
+cnvnator_bin_size: 1000
+
+# GATK gCNV bin length
+gatk_gcnv_bin_length: 1000
+
+# SURVIVOR merge parameters
+survivor_max_dist: 1000      # Maximum distance between breakpoints
+survivor_min_callers: 2      # Minimum number of supporting callers
+survivor_min_size: 50        # Minimum SV size
+
+# Filtering parameters
+sv_filter_expr: 'SVTYPE!="BND" && QUAL>30'
+cnv_filter_expr: 'INFO/SVLEN>5000 || INFO/SVLEN<-5000'
+
+# === ANNOTATION PARAMETERS ===
+
+# VEP cache directory (optional)
+vep_cache_dir: "/path/to/vep_cache"
+
+# Additional VEP arguments
+vep_extra_args: "--symbol --terms SO --hgvs --variant_class"
+
+# === RESOURCE ALLOCATION ===
+
+# Default thread allocation for different stages
+threads:
+  qc: 4
+  alignment: 16
+  sv_calling: 8
+  cnv_calling: 4
+  annotation: 8
+
+# Memory allocation (MB)
+memory:
+  alignment: 16000
+  sv_calling: 8000
+  cnv_calling: 12000
+  annotation: 4000
+
+# === EXAMPLE CONFIGURATION ===
+# Uncomment and modify for your setup:
+
+# samples_tsv: "samples.tsv"
+# raw_reads_dir: "/data/fastq"
+# reference_fasta: "/data/reference/GRCh38.fasta"
+# adapters_fasta: "/data/adapters/TruSeq3-PE.fa"
+# reference_chrom_dir: "/data/reference/GRCh38_chromosomes"
+# vep_cache_dir: "/data/vep_cache"

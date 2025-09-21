@@ -1,0 +1,7 @@
+name: sv_cnv_annotation
+channels:
+  - conda-forge
+  - bioconda
+dependencies:
+  - annotsv>=3.3.6
+  - ensembl-vep>=106.1

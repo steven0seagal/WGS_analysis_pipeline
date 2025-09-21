@@ -1,0 +1,427 @@
+# Snakefile for Comprehensive SV and CNV Analysis
+# Based on the research outlined in research2 document
+# Implements 6-stage analysis framework with ensemble calling strategy
+
+import pandas as pd
+import os
+
+# --- Configuration ---
+configfile: "config.yaml"
+
+# Load sample information from a TSV file
+if os.path.exists(config["samples_tsv"]):
+    SAMPLES_TSV = pd.read_csv(config["samples_tsv"], sep="\t").set_index("sample", drop=False)
+    SAMPLES = list(SAMPLES_TSV.index)
+else:
+    # If no samples file, use single sample from config
+    SAMPLES = [config.get("sample", "sample")]
+
+# --- Target Rule ---
+# This rule defines the final desired output files of the entire pipeline
+rule all:
+    input:
+        # QC reports
+        expand("qc/multiqc_report/multiqc_report.html"),
+        # SV annotations
+        expand("annotations/{sample}.sv.annotsv.tsv", sample=SAMPLES),
+        expand("annotations/{sample}.sv.vep.vcf", sample=SAMPLES),
+        # CNV calls
+        expand("merged_filtered_sv/{sample}.cnv.filtered.vcf.gz", sample=SAMPLES),
+        # Summary reports
+        expand("summary_{sample}.txt", sample=SAMPLES)
+
+# --- Stage 1: QC and Trimming ---
+
+rule fastqc_raw:
+    input:
+        r1=lambda wildcards: config["raw_reads_dir"] + f"/{wildcards.sample}_R1.fastq.gz",
+        r2=lambda wildcards: config["raw_reads_dir"] + f"/{wildcards.sample}_R2.fastq.gz"
+    output:
+        r1_html="qc/raw/{sample}_R1_fastqc.html",
+        r2_html="qc/raw/{sample}_R2_fastqc.html",
+        r1_zip="qc/raw/{sample}_R1_fastqc.zip",
+        r2_zip="qc/raw/{sample}_R2_fastqc.zip"
+    params:
+        outdir="qc/raw"
+    conda: "envs/qc.yaml"
+    threads: 4
+    shell:
+        "fastqc -o {params.outdir} --threads {threads} {input.r1} {input.r2}"
+
+rule trimmomatic:
+    input:
+        r1=lambda wildcards: config["raw_reads_dir"] + f"/{wildcards.sample}_R1.fastq.gz",
+        r2=lambda wildcards: config["raw_reads_dir"] + f"/{wildcards.sample}_R2.fastq.gz"
+    output:
+        r1_trimmed="trimmed_reads/{sample}_R1.trimmed.fastq.gz",
+        r2_trimmed="trimmed_reads/{sample}_R2.trimmed.fastq.gz",
+        r1_unpaired="trimmed_reads/{sample}_R1.unpaired.fastq.gz",
+        r2_unpaired="trimmed_reads/{sample}_R2.unpaired.fastq.gz"
+    params:
+        adapters=config["adapters_fasta"],
+        extra=config.get("trimmomatic_extra", "ILLUMINACLIP:{adapters}:2:30:10 SLIDINGWINDOW:4:20 MINLEN:50")
+    conda: "envs/trimming.yaml"
+    threads: 8
+    shell:
+        """
+        trimmomatic PE -threads {threads} {input.r1} {input.r2} \
+            {output.r1_trimmed} {output.r1_unpaired} {output.r2_trimmed} {output.r2_unpaired} \
+            {params.extra}
+        """
+
+rule fastqc_trimmed:
+    input:
+        r1="trimmed_reads/{sample}_R1.trimmed.fastq.gz",
+        r2="trimmed_reads/{sample}_R2.trimmed.fastq.gz"
+    output:
+        r1_html="qc/trimmed/{sample}_R1.trimmed_fastqc.html",
+        r2_html="qc/trimmed/{sample}_R2.trimmed_fastqc.html",
+        r1_zip="qc/trimmed/{sample}_R1.trimmed_fastqc.zip",
+        r2_zip="qc/trimmed/{sample}_R2.trimmed_fastqc.zip"
+    params:
+        outdir="qc/trimmed"
+    conda: "envs/qc.yaml"
+    threads: 4
+    shell:
+        "fastqc -o {params.outdir} --threads {threads} {input.r1} {input.r2}"
+
+rule multiqc:
+    input:
+        expand("qc/raw/{sample}_{read}_fastqc.{ext}", sample=SAMPLES, read=["R1", "R2"], ext=["html", "zip"]),
+        expand("qc/trimmed/{sample}_{read}.trimmed_fastqc.{ext}", sample=SAMPLES, read=["R1", "R2"], ext=["html", "zip"])
+    output:
+        "qc/multiqc_report/multiqc_report.html"
+    params:
+        qc_dir="qc",
+        output_dir="qc/multiqc_report"
+    conda: "envs/qc.yaml"
+    shell:
+        "multiqc {params.qc_dir} -o {params.output_dir}"
+
+# --- Stage 2: Alignment and BAM Preparation ---
+
+rule bwa_map:
+    input:
+        r1="trimmed_reads/{sample}_R1.trimmed.fastq.gz",
+        r2="trimmed_reads/{sample}_R2.trimmed.fastq.gz",
+        ref=config["reference_fasta"]
+    output:
+        bam=temp("bam/{sample}.bam")
+    params:
+        rg=r"@RG\tID:{sample}\tSM:{sample}\tPL:ILLUMINA"
+    conda: "envs/alignment.yaml"
+    threads: 16
+    shell:
+        """
+        bwa mem -t {threads} -M -R '{params.rg}' {input.ref} {input.r1} {input.r2} | \
+        samtools view -Sb - > {output.bam}
+        """
+
+rule samtools_sort:
+    input:
+        "bam/{sample}.bam"
+    output:
+        temp("bam/{sample}.sorted.bam")
+    conda: "envs/alignment.yaml"
+    threads: 8
+    shell:
+        "samtools sort -@ {threads} -o {output} {input}"
+
+rule picard_markdups:
+    input:
+        "bam/{sample}.sorted.bam"
+    output:
+        bam="analysis_ready_bam/{sample}.dedup.bam",
+        bai="analysis_ready_bam/{sample}.dedup.bam.bai"
+    params:
+        metrics="qc/{sample}.dedup_metrics.txt"
+    conda: "envs/alignment.yaml"
+    resources:
+        mem_mb=8000
+    shell:
+        """
+        picard MarkDuplicates \
+            INPUT={input} OUTPUT={output.bam} METRICS_FILE={params.metrics} \
+            CREATE_INDEX=true VALIDATION_STRINGENCY=STRICT
+        """
+
+# --- Stage 3: Ensemble SV Calling ---
+
+rule manta:
+    input:
+        bam="analysis_ready_bam/{sample}.dedup.bam",
+        bai="analysis_ready_bam/{sample}.dedup.bam.bai",
+        ref=config["reference_fasta"]
+    output:
+        vcf="sv_calls/manta/{sample}/results/variants/diploidSV.vcf.gz",
+        tbi="sv_calls/manta/{sample}/results/variants/diploidSV.vcf.gz.tbi"
+    params:
+        rundir="sv_calls/manta/{sample}"
+    conda: "envs/sv_callers.yaml"
+    threads: 8
+    shell:
+        """
+        configManta.py --bam {input.bam} --referenceFasta {input.ref} --runDir {params.rundir} && \
+        python {params.rundir}/runWorkflow.py -m local -j {threads}
+        """
+
+rule delly:
+    input:
+        bam="analysis_ready_bam/{sample}.dedup.bam",
+        bai="analysis_ready_bam/{sample}.dedup.bam.bai",
+        ref=config["reference_fasta"]
+    output:
+        vcf="sv_calls/delly/{sample}.merged.vcf.gz",
+        tbi="sv_calls/delly/{sample}.merged.vcf.gz.tbi"
+    params:
+        prefix="sv_calls/delly/{sample}"
+    conda: "envs/sv_callers.yaml"
+    shell:
+        """
+        delly call -t DEL -g {input.ref} -o {params.prefix}.del.bcf {input.bam} && \
+        delly call -t DUP -g {input.ref} -o {params.prefix}.dup.bcf {input.bam} && \
+        delly call -t INV -g {input.ref} -o {params.prefix}.inv.bcf {input.bam} && \
+        delly call -t TRA -g {input.ref} -o {params.prefix}.tra.bcf {input.bam} && \
+        bcftools concat -a {params.prefix}.*.bcf | bcftools sort -Oz -o {output.vcf} && \
+        tabix -p vcf {output.vcf} && \
+        rm {params.prefix}.*.bcf
+        """
+
+rule lumpy:
+    input:
+        bam="analysis_ready_bam/{sample}.dedup.bam",
+        bai="analysis_ready_bam/{sample}.dedup.bam.bai"
+    output:
+        vcf="sv_calls/lumpy/{sample}.vcf"
+    params:
+        discordants=temp("sv_calls/lumpy/{sample}.discordants.sorted.bam"),
+        splitters=temp("sv_calls/lumpy/{sample}.splitters.sorted.bam")
+    conda: "envs/sv_callers.yaml"
+    threads: 8
+    shell:
+        """
+        samtools view -b -F 1294 {input.bam} | samtools sort -@ {threads} -o {params.discordants} && \
+        samtools view -h {input.bam} | extractSplitReads_BwaMem -i stdin | \
+        samtools view -Sb - | samtools sort -@ {threads} -o {params.splitters} && \
+        lumpyexpress -B {input.bam} -S {params.splitters} -D {params.discordants} -o {output.vcf}
+        """
+
+# --- Stage 4: CNV Calling ---
+
+rule cnvnator:
+    input:
+        bam="analysis_ready_bam/{sample}.dedup.bam",
+        ref_dir=config["reference_chrom_dir"]
+    output:
+        vcf="cnv_calls/cnvnator/{sample}.vcf",
+        out="cnv_calls/cnvnator/{sample}.cnvnator.out"
+    params:
+        root="cnv_calls/cnvnator/{sample}.root",
+        bin_size=config.get("cnvnator_bin_size", 1000),
+        chroms=" ".join([str(i) for i in range(1, 23)] + ["X", "Y"])
+    conda: "envs/cnv_callers.yaml"
+    shell:
+        """
+        cnvnator -root {params.root} -tree {input.bam} -chrom {params.chroms} && \
+        cnvnator -root {params.root} -his {params.bin_size} -d {input.ref_dir} && \
+        cnvnator -root {params.root} -stat {params.bin_size} && \
+        cnvnator -root {params.root} -partition {params.bin_size} && \
+        cnvnator -root {params.root} -call {params.bin_size} > {output.out} && \
+        cnvnator2VCF.pl {output.out} > {output.vcf}
+        """
+
+rule gatk_gcnv:
+    input:
+        bam="analysis_ready_bam/{sample}.dedup.bam",
+        ref=config["reference_fasta"]
+    output:
+        segments="cnv_calls/gatk_gcnv/{sample}.segments.vcf",
+        intervals="cnv_calls/gatk_gcnv/{sample}.intervals.vcf"
+    params:
+        bin_length=config.get("gatk_gcnv_bin_length", 1000),
+        preprocessing_dir="cnv_calls/gatk_gcnv/preprocessing",
+        ploidy_dir="cnv_calls/gatk_gcnv/{sample}-ploidy-calls",
+        calls_dir="cnv_calls/gatk_gcnv/{sample}-gcnv-calls"
+    conda: "envs/cnv_callers.yaml"
+    shell:
+        """
+        mkdir -p {params.preprocessing_dir} && \
+        gatk PreprocessIntervals \
+            -R {input.ref} \
+            --bin-length {params.bin_length} \
+            --padding 0 \
+            -O {params.preprocessing_dir}/preprocessed.interval_list && \
+        gatk CollectReadCounts \
+            -I {input.bam} \
+            -L {params.preprocessing_dir}/preprocessed.interval_list \
+            --interval-merging-rule OVERLAPPING_ONLY \
+            -O cnv_calls/gatk_gcnv/{wildcards.sample}.counts.hdf5 && \
+        gatk DetermineGermlineContigPloidy \
+            -I cnv_calls/gatk_gcnv/{wildcards.sample}.counts.hdf5 \
+            --output {params.ploidy_dir} \
+            --output-prefix {wildcards.sample} && \
+        gatk GermlineCNVCaller \
+            --run-mode CASE \
+            -I cnv_calls/gatk_gcnv/{wildcards.sample}.counts.hdf5 \
+            --contig-ploidy-calls {params.ploidy_dir} \
+            --output {params.calls_dir} \
+            --output-prefix {wildcards.sample} && \
+        gatk PostprocessGermlineCNVCalls \
+            --model-shard-path {params.calls_dir}/shard-0 \
+            --calls-shard-path {params.calls_dir}/shard-0 \
+            --allosomal-contig X --allosomal-contig Y \
+            --contig-ploidy-calls {params.ploidy_dir} \
+            --sample-index 0 \
+            --output-genotyped-intervals {output.intervals} \
+            --output-genotyped-segments {output.segments}
+        """
+
+# --- Stage 5: Integration and Filtering ---
+
+rule survivor_merge:
+    input:
+        manta="sv_calls/manta/{sample}/results/variants/diploidSV.vcf.gz",
+        delly="sv_calls/delly/{sample}.merged.vcf.gz",
+        lumpy="sv_calls/lumpy/{sample}.vcf"
+    output:
+        vcf=temp("merged_filtered_sv/{sample}.sv.merged.vcf")
+    params:
+        vcf_list="merged_filtered_sv/{sample}.vcf_list.txt",
+        max_dist=config.get("survivor_max_dist", 1000),
+        min_callers=config.get("survivor_min_callers", 2),
+        min_size=config.get("survivor_min_size", 50)
+    conda: "envs/integration.yaml"
+    shell:
+        """
+        echo {input.manta} > {params.vcf_list} && \
+        echo {input.delly} >> {params.vcf_list} && \
+        echo {input.lumpy} >> {params.vcf_list} && \
+        SURVIVOR merge {params.vcf_list} {params.max_dist} {params.min_callers} 1 1 0 {params.min_size} {output.vcf}
+        """
+
+rule bcftools_filter_sv:
+    input:
+        vcf="merged_filtered_sv/{sample}.sv.merged.vcf"
+    output:
+        vcf="merged_filtered_sv/{sample}.sv.merged.filtered.vcf.gz",
+        tbi="merged_filtered_sv/{sample}.sv.merged.filtered.vcf.gz.tbi"
+    params:
+        filter_expr=config.get("sv_filter_expr", 'SVTYPE!="BND" && QUAL>30')
+    conda: "envs/integration.yaml"
+    shell:
+        """
+        bcftools filter -i '{params.filter_expr}' {input.vcf} | \
+        bgzip -c > {output.vcf} && \
+        tabix -p vcf {output.vcf}
+        """
+
+rule bcftools_filter_cnv:
+    input:
+        vcf="cnv_calls/cnvnator/{sample}.vcf"
+    output:
+        vcf="merged_filtered_sv/{sample}.cnv.filtered.vcf.gz",
+        tbi="merged_filtered_sv/{sample}.cnv.filtered.vcf.gz.tbi"
+    params:
+        filter_expr=config.get("cnv_filter_expr", 'INFO/SVLEN>5000 || INFO/SVLEN<-5000')
+    conda: "envs/integration.yaml"
+    shell:
+        """
+        bcftools filter -i '{params.filter_expr}' {input.vcf} | \
+        bgzip -c > {output.vcf} && \
+        tabix -p vcf {output.vcf}
+        """
+
+# --- Stage 6: Annotation ---
+
+rule annotsv:
+    input:
+        vcf="merged_filtered_sv/{sample}.sv.merged.filtered.vcf.gz"
+    output:
+        tsv="annotations/{sample}.sv.annotsv.tsv"
+    params:
+        build=config.get("genome_build", "GRCh38")
+    conda: "envs/annotation.yaml"
+    shell:
+        "AnnotSV -SVinputFile {input.vcf} -outputFile {output.tsv} -genomeBuild {params.build}"
+
+rule vep:
+    input:
+        vcf="merged_filtered_sv/{sample}.sv.merged.filtered.vcf.gz",
+        ref=config["reference_fasta"]
+    output:
+        vcf="annotations/{sample}.sv.vep.vcf"
+    params:
+        vep_cache=config.get("vep_cache_dir", ""),
+        extra_args=config.get("vep_extra_args", "--symbol --terms SO --hgvs")
+    conda: "envs/annotation.yaml"
+    threads: 8
+    shell:
+        """
+        vep --input_file {input.vcf} --output_file {output.vcf} \
+            --vcf --cache --offline --fork {threads} --fasta {input.ref} \
+            {params.extra_args}
+        """
+
+# --- Summary Report ---
+
+rule generate_summary:
+    input:
+        sv_vcf="merged_filtered_sv/{sample}.sv.merged.filtered.vcf.gz",
+        cnv_out="cnv_calls/cnvnator/{sample}.cnvnator.out",
+        multiqc="qc/multiqc_report/multiqc_report.html",
+        bam="analysis_ready_bam/{sample}.dedup.bam"
+    output:
+        summary="summary_{sample}.txt"
+    conda: "envs/integration.yaml"
+    shell:
+        """
+        echo "SV/CNV Analysis Summary for Sample: {wildcards.sample}" > {output.summary}
+        echo "Date: $(date)" >> {output.summary}
+        echo "========================================" >> {output.summary}
+        echo "" >> {output.summary}
+        echo "Output Files:" >> {output.summary}
+        echo "- Analysis-ready BAM: {input.bam}" >> {output.summary}
+        echo "- Merged SV calls: {input.sv_vcf}" >> {output.summary}
+        echo "- CNV calls: {input.cnv_out}" >> {output.summary}
+        echo "- MultiQC report: {input.multiqc}" >> {output.summary}
+        echo "" >> {output.summary}
+        echo "Variant Calling Results:" >> {output.summary}
+        SV_COUNT=$(bcftools view -H {input.sv_vcf} | wc -l)
+        echo "- Structural variants: $SV_COUNT" >> {output.summary}
+        CNV_COUNT=$(grep -v "^#" {input.cnv_out} | wc -l)
+        echo "- Copy number variants: $CNV_COUNT" >> {output.summary}
+        echo "" >> {output.summary}
+        echo "Analysis completed successfully at $(date)" >> {output.summary}
+        """
+
+# --- Optional Rules ---
+
+# Rule to clean temporary files
+rule clean:
+    shell:
+        """
+        rm -rf bam/*.bam
+        rm -rf trimmed_reads/*.unpaired.fastq.gz
+        rm -rf sv_calls/*/shard-*
+        rm -rf cnv_calls/*/*.root
+        """
+
+# Rule to validate VCF files
+rule validate_vcfs:
+    input:
+        expand("merged_filtered_sv/{sample}.sv.merged.filtered.vcf.gz", sample=SAMPLES),
+        expand("merged_filtered_sv/{sample}.cnv.filtered.vcf.gz", sample=SAMPLES)
+    output:
+        "validation_report.txt"
+    conda: "envs/integration.yaml"
+    shell:
+        """
+        echo "VCF Validation Report" > {output}
+        echo "Date: $(date)" >> {output}
+        echo "===================" >> {output}
+        for vcf in {input}; do
+            echo "Validating $vcf" >> {output}
+            bcftools stats $vcf >> {output}
+            echo "" >> {output}
+        done
+        """

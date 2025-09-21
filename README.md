@@ -9,11 +9,16 @@
 [![Docker](https://img.shields.io/badge/docker-≥20.10-blue.svg)](https://www.docker.com/)
 [![Python 3.9+](https://img.shields.io/badge/python-3.9+-blue.svg)](https://www.python.org/downloads/)
 
-A comprehensive repository for Whole Genome Sequencing (WGS) germline variant analysis pipelines using GATK and DeepVariant.
+A comprehensive repository for Whole Genome Sequencing (WGS) analysis pipelines including germline variant discovery (GATK, DeepVariant) and structural/copy number variant analysis (SV/CNV).
 
 ## Overview
 
-This repository provides end-to-end pipelines for germline variant discovery from WGS data, implementing both the established GATK Best Practices and the modern DeepVariant approach. The pipelines are available in both Bash scripts for conceptual clarity and Snakemake workflows for production-scale reproducibility and scalability.
+This repository provides end-to-end pipelines for comprehensive WGS analysis, including:
+- **Germline variant discovery** using GATK Best Practices and DeepVariant
+- **Structural variant (SV) analysis** with ensemble calling using Manta, Delly, and Lumpy
+- **Copy number variant (CNV) detection** using CNVnator and GATK gCNV
+
+All pipelines are available in both Bash scripts for conceptual clarity and Snakemake workflows for production-scale reproducibility and scalability.
 
 ## Table of Contents
 
@@ -32,7 +37,8 @@ This repository provides end-to-end pipelines for germline variant discovery fro
 - **Preprocessing**: FASTQ to analysis-ready BAM conversion with BWA alignment, duplicate marking, and base quality score recalibration (BQSR)
 - **GATK Pipeline**: HaplotypeCaller with GVCF workflow, joint genotyping, and variant quality score recalibration (VQSR)
 - **DeepVariant Pipeline**: Deep learning-based variant calling using convolutional neural networks
-- **Functional Annotation**: Variant annotation with SnpEff and Ensembl VEP
+- **SV/CNV Pipeline**: Comprehensive structural and copy number variant analysis with ensemble calling
+- **Functional Annotation**: Variant annotation with SnpEff, VEP, and AnnotSV
 - **Workflow Management**: Snakemake for scalable, reproducible execution
 - **Containerization**: Docker support for DeepVariant
 
@@ -98,6 +104,32 @@ cd workflows/deepvariant
 snakemake -j <num_cores>
 ```
 
+### 6. Run SV/CNV Pipeline
+
+Using the bash script:
+
+```bash
+cd workflows/sv_cnv
+# Copy and edit configuration
+cp config_example.sh config.sh
+# Edit config.sh with your paths
+./sv_cnv_pipeline.sh config.sh
+```
+
+Or using Snakemake:
+
+```bash
+cd workflows/sv_cnv
+# Edit config.yaml with your paths
+snakemake --use-conda -j <num_cores>
+```
+
+Using the convenience script:
+
+```bash
+./run_sv_cnv.sh Sample1 /path/to/fastq /path/to/output /path/to/ref.fasta
+```
+
 ## Pipeline Components
 
 ### Preprocessing Pipeline
@@ -117,6 +149,13 @@ snakemake -j <num_cores>
 - Supports multiple sequencing types (WGS, WES, PacBio)
 - Containerized execution with Docker
 
+### SV/CNV Pipeline
+- **Six-stage analysis framework**: QC → Alignment → SV calling → CNV calling → Integration → Annotation
+- **Ensemble SV calling**: Manta, Delly, and Lumpy for comprehensive structural variant detection
+- **CNV detection**: CNVnator and GATK gCNV for copy number analysis
+- **Integration and filtering**: SURVIVOR for merging callsets with configurable stringency
+- **Comprehensive annotation**: AnnotSV and VEP for functional impact prediction
+
 ## Directory Structure
 
 ```
@@ -130,9 +169,16 @@ snakemake -j <num_cores>
 │   │   ├── Snakefile            # Snakemake workflow
 │   │   ├── config.yaml          # Configuration
 │   │   └── envs/                # Conda environments
-│   └── deepvariant/             # DeepVariant pipeline
-│       ├── Snakefile
-│       └── config.yaml
+│   ├── deepvariant/             # DeepVariant pipeline
+│   │   ├── Snakefile
+│   │   └── config.yaml
+│   └── sv_cnv/                  # SV/CNV pipeline
+│       ├── Snakefile            # Snakemake workflow
+│       ├── config.yaml          # Configuration
+│       ├── sv_cnv_pipeline.sh   # Bash script version
+│       ├── config_example.sh    # Example configuration
+│       ├── samples.tsv          # Sample list
+│       └── envs/                # Conda environments
 ├── docs/                        # Documentation
 ├── LICENSE
 └── README.md
@@ -150,6 +196,8 @@ snakemake -j <num_cores>
 
 - [Setup Guide](docs/setup.md) - Detailed setup instructions
 - [Pipeline Descriptions](docs/pipelines.md) - In-depth pipeline explanations
+- [SV/CNV Analysis Guide](docs/sv_cnv_analysis.md) - Comprehensive SV/CNV analysis documentation
+- [SV/CNV Examples](docs/sv_cnv_examples.md) - Practical examples and use cases
 - [Examples](docs/examples.md) - Complete workflow examples
 - [Troubleshooting](docs/troubleshooting.md) - Common issues and solutions
 
@@ -181,6 +229,11 @@ Additionally, please cite the underlying tools:
 - DeepVariant: Poplin et al., 2018
 - SnpEff: Cingolani et al., 2012
 - VEP: McLaren et al., 2016
+- Manta: Chen et al., 2016
+- Delly: Rausch et al., 2012
+- Lumpy: Layer et al., 2014
+- CNVnator: Abyzov et al., 2011
+- AnnotSV: Geoffroy et al., 2018
 
 ## License
 

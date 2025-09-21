@@ -1,0 +1,6 @@
+name: sv_cnv_trimming
+channels:
+  - conda-forge
+  - bioconda
+dependencies:
+  - trimmomatic>=0.39

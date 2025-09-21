@@ -1,0 +1,9 @@
+name: sv_cnv_integration
+channels:
+  - conda-forge
+  - bioconda
+dependencies:
+  - survivor>=1.0.7
+  - bcftools>=1.15
+  - tabix>=1.15
+  - bgzip>=1.15
